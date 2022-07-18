@@ -1,7 +1,3 @@
-
-from multiprocessing.sharedctypes import Value
-
-
 class WordSelector:
     #Initialize set for allowed word lookup in O(1) time
     allowed_words_set = set()

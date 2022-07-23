@@ -1,9 +1,13 @@
 import discord
 import asyncio
 import random
+import datetime
 import wordle as w
 import resources
 from discord.ext import commands
+
+intents = discord.Intents.all()
+intents.message_content = True
 
 wordles_in_progress = set()
 prefix = "~"
@@ -11,22 +15,66 @@ prefix = "~"
 TOKEN = resources.TOKEN
   
 #Initialize bot object and command prefix, delete default help command
-bot = commands.Bot(command_prefix=prefix, help_command=None)
+bot = commands.Bot(command_prefix=prefix, help_command=None, intents=intents) 
 
 #Startup message
 @bot.event
 async def on_ready():
     print('Login as {0.user}'.format(bot))
 
-@bot.command(name='help', brief='Returns a list of available commands for this bot.')
+'''
+@bot.slash_command()
+async def checkadmin(ctx, member: discord.Member):
+  own =""
+  if not member.guild_permissions.administrator: own = "not "
+  await ctx.respond(f"That user **does {own}**have admin.")
+'''
+
+@bot.slash_command(name='bomb', description='Requires a user to say a phrase in order to avoid getting timed out.')
+async def bomb(ctx, member: discord.Member, minutes: int, phrase: str):  
+  if not ctx.author.guild_permissions.administrator:
+    await ctx.respond(f"You don't have permission to use this command. Furthermore, you just tried to force {member.mention} to say \"**{phrase}**\". You should be ashamed of yourself.")
+    return
+
+  if member.guild_permissions.administrator:
+    await ctx.respond("This user can't be timed out.")
+    return
+
+  max = 180
+  if minutes > max:
+    await ctx.respond(f"You cannot time out someone for more than {max} minutes with this command.")
+    return
+  
+  countdown = 60
+  def check(msg):
+    return msg.author == member and msg.content == phrase
+  
+  await ctx.respond(f"User {member.mention} has had a bomb strapped to them. To disable it, they must type \'**{phrase}**\' exactly in the next {countdown} second(s). Otherwise, they'll be timed out for **{minutes} minute(s)**.")
+
+  try:
+    await bot.wait_for(event = 'message', check=check, timeout = countdown)
+    await bot.send(f"The bomb has been defused! {member.mention} is safe...for now.")
+  except asyncio.TimeoutError:
+    duration = datetime.timedelta(minutes=minutes)
+    await member.timeout_for(duration)
+    await ctx.send(f"Time's up. The bomb exploded and {member.mention} has been timed out for {minutes} minute(s).")
+  
+@bot.command(name='botowner', description='Returns information about the owner of this bot.')
 async def help(ctx):
-  help_string = "**Available commands**:\n"
+  app_info = await bot.application_info()
+  bot_owner = app_info.owner
+  owner_embed = discord.Embed(title = f"{bot.user.name}'s owner is:", description=bot_owner)
+  owner_embed.set_thumbnail(url=bot_owner.display_avatar.url)
+  await ctx.send(embed = owner_embed)
+
+@bot.command(name='help', description='Returns a list of available commands for this bot.')
+async def help(ctx):
+  help_string = "**Available commands** (Slash commands not included):\n"
   for command in bot.commands:
-    help_string += f"{prefix}{command.name} - {command.brief}\n"
+    help_string += f"{prefix}{command.name} - {command.description}\n"
   await ctx.send(help_string)
 
-
-@bot.command(name='wordlemulti', brief='Plays a version of Wordle with multiplayer added.')
+@bot.command(name='wordlemulti', description='Plays a version of Wordle with multiplayer added.')
 async def wordlemulti(ctx):
   global wordles_in_progress
   quit_cmd = "quit"
@@ -81,9 +129,9 @@ async def wordlemulti(ctx):
   #~~~~~~~~~~~~~~~~~~ROUND LOOP~~~~~~~~~~~~~~~~~~
   while True:  
     #Prints the scoreboard
-    scoreboard = f"**Scoreboard** (first to {wins_needed} wins): "
+    scoreboard = f"**Scoreboard** (first to {wins_needed} wins) - "
     for counter, player in enumerate(player_set):
-      scoreboard += f"{player.name}: {player_dict[player.id]} wins"
+      scoreboard += f"{player.name}: {player_dict[player.id]}"
       if counter == len(player_list) - 1: break
       scoreboard += ", "
     await ctx.send(scoreboard)
@@ -128,7 +176,7 @@ async def wordlemulti(ctx):
     while game.curr_turn < game.turns and round_still_going:
 
       play_timer = 120
-      await ctx.send(f"It's currently {player_list[curr_i].mention}'s turn. You have {play_timer} seconds, no countdown.")
+      await ctx.send(f"It's currently {player_list[curr_i].mention}'s turn. You have {play_timer} seconds, no countdown (Invalid guesses still count).")
 
       game_embed = discord.Embed(
         title = f"Wordle {game.curr_turn + 1}/6 - Round {num_rounds}",
@@ -137,42 +185,38 @@ async def wordlemulti(ctx):
       )
       await ctx.send(embed = game_embed)
 
-      user_has_not_played = True
-      #~~~~~~~~~~~~~~~~~~WAITING FOR MESSAGE LOOP~~~~~~~~~~~~~~~~~~
-      while user_has_not_played:
+      #~~~~~~~~~~~~~~~~~~WAITING FOR MESSAGE SECTION~~~~~~~~~~~~~~~~~~
+      try:
+        response = await bot.wait_for(event = 'message', check=check, timeout = play_timer)
+      except asyncio.TimeoutError:
+        await ctx.send("Time's up.")
+        break
 
-        try:
-          response = await bot.wait_for(event = 'message', check=check, timeout = play_timer)
-        except asyncio.TimeoutError:
-          await ctx.send("Time's up.")
-          break
+      guess = response.content
+      #exit command
+      if guess == prefix + quit_cmd:
+        await ctx.send(f"Current Wordle game has ended. The word was ||**{game.answer}**||.")
+        wordles_in_progress.remove(ctx.channel.id)
+        return
 
-        guess = response.content
-        #exit command
-        if guess == prefix + quit_cmd:
-          await ctx.send(f"Current Wordle game has ended. The word was ||**{game.answer}**||.")
+      try:
+        game.make_guess(guess)
+      except Exception as err:
+        await ctx.send(err)
+      
+      user_has_not_played = False
+      #game winning state
+      if guess == game.answer:
+        player_dict[player_list[curr_i].id] += 1
+        
+        #True winning state
+        await ctx.send(f"{player_list[curr_i].mention} wins the round. The word was **{game.answer}**. Number of attempts: {game.curr_turn}")
+
+        if player_dict[player_list[curr_i].id] == wins_needed:
+          await ctx.send(f"**<@{player_list[curr_i].id}> wins the game!**")
           wordles_in_progress.remove(ctx.channel.id)
           return
-
-        try:
-          game.make_guess(guess)
-          user_has_not_played = False
-        except Exception as err:
-          await ctx.send(err)
-          continue
-
-        #game winning state
-        if guess == game.answer:
-          player_dict[player_list[curr_i].id] += 1
-          
-          #True winning state
-          await ctx.send(f"{player_list[curr_i].mention} wins the round. The word was **{game.answer}**. Number of attempts: {game.curr_turn}")
-
-          if player_dict[player_list[curr_i].id] == wins_needed:
-            await ctx.send(f"**<@{player_list[curr_i].id}> wins the game!**")
-            wordles_in_progress.remove(ctx.channel.id)
-            return
-          round_still_going = False
+        round_still_going = False
 
       #Rotates through each player
       curr_i = curr_i + 1 if curr_i != len(player_list) - 1 else 0
@@ -185,7 +229,7 @@ async def wordlemulti(ctx):
     await asyncio.sleep(2)
   
 
-@bot.command(name='wordle', brief='Plays a single Wordle game.')
+@bot.command(name='wordle', description='Plays a single Wordle game.')
 async def wordle(ctx):
   #adds current channel to wordle in progress set
   global wordles_in_progress
